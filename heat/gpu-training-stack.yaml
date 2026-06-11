@@ -1,0 +1,137 @@
+heat_template_version: 2021-04-06
+
+description: >
+  Heat stack for a GPU training instance on OpenStack.
+  Provisions a Nova instance with PCI-passthrough GPU, attaches it to the
+  AI training network, and runs cloud-init to install CUDA + PyTorch.
+
+parameters:
+  flavor:
+    type: string
+    default: gpu.a100.1x
+    constraints:
+      - allowed_values: [gpu.a100.1x, gpu.a100.2x, gpu.t4.1x]
+    description: GPU Nova flavor
+
+  image:
+    type: string
+    default: Ubuntu-22.04
+    description: Base image name or ID
+
+  key_name:
+    type: string
+    description: SSH keypair for instance access
+
+  network:
+    type: string
+    default: ai-training-net
+    description: AI training network name
+
+  security_group:
+    type: string
+    default: ai-training
+    description: Security group name
+
+  cuda_version:
+    type: string
+    default: "12.4"
+    description: CUDA toolkit version to install
+
+resources:
+  gpu_instance:
+    type: OS::Nova::Server
+    properties:
+      name: gpu-training-instance
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      networks:
+        - network: { get_param: network }
+      security_groups:
+        - { get_param: security_group }
+      metadata:
+        role: ai-training
+        managed-by: heat
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+
+            # ── System update ────────────────────────────────────────────────
+            apt-get update -qq && apt-get upgrade -yqq
+
+            # ── CUDA toolkit ─────────────────────────────────────────────────
+            wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+            dpkg -i cuda-keyring_1.1-1_all.deb
+            apt-get update -qq
+            apt-get install -yqq cuda-toolkit-$CUDA_MAJOR_MINOR
+
+            # ── NVIDIA drivers ───────────────────────────────────────────────
+            apt-get install -yqq nvidia-driver-545 nvidia-utils-545
+
+            # ── Docker + NVIDIA Container Toolkit ────────────────────────────
+            curl -fsSL https://get.docker.com | sh
+            curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+            curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+              sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+              tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+            apt-get update -qq && apt-get install -yqq nvidia-container-toolkit
+            nvidia-ctk runtime configure --runtime=docker
+            systemctl restart docker
+
+            # ── Python + PyTorch ─────────────────────────────────────────────
+            apt-get install -yqq python3-pip python3-venv
+            pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+            pip3 install transformers datasets accelerate peft bitsandbytes
+
+            # ── Verify GPU ───────────────────────────────────────────────────
+            nvidia-smi > /root/gpu-info.txt 2>&1 || true
+            python3 -c "import torch; print('CUDA:', torch.cuda.is_available(), '| GPUs:', torch.cuda.device_count())" >> /root/gpu-info.txt 2>&1 || true
+
+            echo "GPU instance setup complete. Check /root/gpu-info.txt"
+          params:
+            $CUDA_MAJOR_MINOR:
+              str_replace:
+                template: $v
+                params:
+                  $v: { get_param: cuda_version }
+
+  floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: external
+
+  floating_ip_assoc:
+    type: OS::Nova::FloatingIPAssociation
+    properties:
+      floating_ip: { get_resource: floating_ip }
+      server_id: { get_resource: gpu_instance }
+
+outputs:
+  instance_id:
+    description: Nova instance ID
+    value: { get_resource: gpu_instance }
+
+  instance_ip:
+    description: AI training network IP
+    value:
+      get_attr: [gpu_instance, networks, ai-training-net, 0]
+
+  floating_ip:
+    description: Public floating IP for SSH access
+    value: { get_attr: [floating_ip, floating_ip_address] }
+
+  ssh_command:
+    description: SSH command to connect
+    value:
+      str_replace:
+        template: ssh -i <your-key>.pem ubuntu@$FIP
+        params:
+          $FIP: { get_attr: [floating_ip, floating_ip_address] }
+
+  gpu_info:
+    description: Check GPU after cloud-init: cat /root/gpu-info.txt
+    value: "ssh to instance and run: cat /root/gpu-info.txt"

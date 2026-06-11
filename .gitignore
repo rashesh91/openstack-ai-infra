@@ -1,0 +1,6 @@
+passwords.yml
+admin-openrc.sh
+*-openrc.sh
+*.pem
+*.key
+secrets/

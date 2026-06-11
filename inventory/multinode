@@ -1,0 +1,96 @@
+[control]
+10.0.1.11 ansible_user=ubuntu
+10.0.1.12 ansible_user=ubuntu
+10.0.1.13 ansible_user=ubuntu
+
+[compute]
+10.0.1.21 ansible_user=ubuntu
+10.0.1.22 ansible_user=ubuntu
+10.0.1.23 ansible_user=ubuntu
+10.0.1.24 ansible_user=ubuntu
+
+[gpu-compute]
+10.0.1.41 ansible_user=ubuntu
+10.0.1.42 ansible_user=ubuntu
+10.0.1.43 ansible_user=ubuntu
+10.0.1.44 ansible_user=ubuntu
+
+[storage]
+10.0.1.31 ansible_user=ubuntu
+10.0.1.32 ansible_user=ubuntu
+10.0.1.33 ansible_user=ubuntu
+
+[network]
+10.0.1.11 ansible_user=ubuntu
+10.0.1.12 ansible_user=ubuntu
+10.0.1.13 ansible_user=ubuntu
+
+[monitoring]
+10.0.1.11 ansible_user=ubuntu
+10.0.1.12 ansible_user=ubuntu
+10.0.1.13 ansible_user=ubuntu
+
+[baremetal]
+10.0.1.41 ansible_user=ubuntu
+10.0.1.42 ansible_user=ubuntu
+10.0.1.43 ansible_user=ubuntu
+10.0.1.44 ansible_user=ubuntu
+
+[baremetal:children]
+control
+compute
+gpu-compute
+storage
+network
+
+[haproxy:children]
+control
+
+[chrony:children]
+baremetal
+
+[mariadb:children]
+control
+
+[rabbitmq:children]
+control
+
+[outward-edge:children]
+network
+
+[nova:children]
+control
+compute
+gpu-compute
+
+[nova-compute:children]
+compute
+gpu-compute
+
+[neutron:children]
+control
+network
+compute
+gpu-compute
+
+[glance:children]
+control
+
+[cinder:children]
+control
+storage
+
+[heat:children]
+control
+
+[barbican:children]
+control
+
+[prometheus:children]
+monitoring
+
+[grafana:children]
+monitoring
+
+[ironic:children]
+control

@@ -1,0 +1,137 @@
+---
+# Configure bare-metal compute nodes for GPU workloads.
+# Run after kolla-ansible deploy, before adding nodes to Nova GPU aggregate.
+#
+# Usage: ansible-playbook -i inventory/multinode playbooks/configure-gpu-nodes.yml
+
+- name: Configure GPU compute nodes
+  hosts: gpu_compute
+  become: true
+  vars:
+    hugepages_size_gb: 16        # Reserve 16 GB of hugepages per node
+    cpu_governor: performance
+    nvidia_driver_version: "545"
+    disable_numa_balancing: true
+
+  tasks:
+    - name: Install CUDA keyring
+      apt:
+        deb: "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb"
+        state: present
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install NVIDIA drivers
+      apt:
+        name:
+          - "nvidia-driver-{{ nvidia_driver_version }}"
+          - "nvidia-utils-{{ nvidia_driver_version }}"
+          - nvidia-cuda-toolkit
+        state: present
+
+    - name: Configure hugepages (persistent across reboots)
+      lineinfile:
+        path: /etc/sysctl.conf
+        regexp: '^vm.nr_hugepages'
+        line: "vm.nr_hugepages={{ (hugepages_size_gb * 1024) // 2 }}"
+      notify: Apply sysctl
+
+    - name: Mount hugepages at boot
+      mount:
+        path: /dev/hugepages
+        src: hugetlbfs
+        fstype: hugetlbfs
+        opts: "mode=1770,gid=kvm"
+        state: mounted
+
+    - name: Set CPU governor to performance
+      shell: |
+        for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+          echo {{ cpu_governor }} > "$cpu" 2>/dev/null || true
+        done
+      changed_when: false
+
+    - name: Make CPU governor persistent
+      copy:
+        dest: /etc/rc.local
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            echo performance > "$cpu" 2>/dev/null || true
+          done
+          exit 0
+
+    - name: Disable NUMA balancing (reduces NUMA migration overhead for GPU workloads)
+      sysctl:
+        name: kernel.numa_balancing
+        value: "0"
+        state: present
+        reload: yes
+      when: disable_numa_balancing
+
+    - name: Configure NVIDIA MPS (Multi-Process Service) for shared GPU access
+      copy:
+        dest: /etc/systemd/system/nvidia-mps.service
+        content: |
+          [Unit]
+          Description=NVIDIA Multi-Process Service
+          After=network.target
+
+          [Service]
+          Type=forking
+          User=root
+          ExecStart=/usr/bin/nvidia-cuda-mps-control -d
+          ExecStop=/bin/echo quit | /usr/bin/nvidia-cuda-mps-control
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable NVIDIA MPS service
+      systemd:
+        name: nvidia-mps
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Disable transparent hugepages (THP causes jitter on GPU workloads)
+      copy:
+        dest: /etc/systemd/system/disable-thp.service
+        content: |
+          [Unit]
+          Description=Disable Transparent Huge Pages
+          After=sysinit.target local-fs.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/enabled'
+          ExecStart=/bin/sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/defrag'
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Enable and start disable-thp
+
+    - name: Verify NVIDIA driver
+      command: nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+      register: gpu_info
+      changed_when: false
+      failed_when: false
+
+    - name: Print GPU info
+      debug:
+        msg: "{{ gpu_info.stdout_lines }}"
+
+  handlers:
+    - name: Apply sysctl
+      command: sysctl -p
+
+    - name: Enable and start disable-thp
+      systemd:
+        name: disable-thp
+        enabled: yes
+        state: started
+        daemon_reload: yes
